@@ -1,93 +1,162 @@
 # Podman Quadlet for 418
 
+This is an example quadlet showing a *very* high degree of isolation for
+an nginx web server, using error code 418 for funsies.
 
+This requires a reverse proxy in front of it to handle forwarding the
+incoming connection. The only requirements for the reverse proxy are to be
+able to connect to a Unix socket, and to be on the same physical host
+machine (we're using file based access only here).
+
+While this is truly excessive for a static page informing users that
+coffee cannot be served for reason: am teapot, it's a fun way to show how
+I handle a high degree of isolation for a web server and this can be
+adapted/extended to apply to a wide range of web exposed services.
+
+## Architectural Description
+
+### Reverse proxy
+
+A reverse proxy needs to sit in front of this server to handle forwarding
+the incoming connections. This is required for any network access at all.
+
+Here's an example snippet for Nginx, but any web server that can connect
+to a Unix socket may be used:
+
+```
+	server {
+		listen	[::]:80;
+		listen	80;
+		server_name $name_http;
+		location / {
+			proxy_pass http://$name_http;
+
+			proxy_set_header Host $host;
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto $scheme;
+		}
+
+		error_page 500 502 503 504 /50x.html;
+		location = /50x.html {
+			root /usr/share/nginx/html/;
+		}
+	}
+
+	upstream coffee_backend_http {
+		server unix:/sockets/coffee/coffee.sock;
+	}
+```
+
+And then the reverse proxy quadlet would also need in its quadlet's
+`[Container]` section:
+
+```
+Volume=/run/user/1234/proxy:/sockets/coffee:z
+```
+
+Where `1234` is the UID of the unprivileged user account owning our
+example teapot container. I prefer to keep sockets in `/run` or
+`/var/run` but (with appropriate permissions set) any directory can be
+used. One immediate advantage (aside from it being common practice to put
+sockets under `/run` or `/var/run`) is that the user's run directory has
+additional builtin protections that help prevent unauthorized access to
+the socket where the socket file itself is wide open to allow the reverse
+proxy's forked web user to read/write to the socket.
+
+### Web server
+
+The whole raison d'être of this little project is to be a proof of
+concept/demo of a highly isolated, unprivileged (rootless) container that
+provides a web server, so there are choices here that make dev/debug more
+difficult than they strictly need to be.
+
+The first level of isolation is, since the reverse proxy handles opening
+ports and network access, we don't need root (reverse proxy can be
+rootful or rootless, but this demo assumes it's rootful and serving on
+port 80; rootless requires some additional permissions sorcery). So we
+create a completely unprivileged user that can own this container.
+
+The next level is to change the container namespace using `UserNS=auto`,
+which is helpful if we want to, for example, run a couple of pods under
+this user but don't necessarily want them to be able to talk to each
+other (typically better to put each pod under its own user, but we're
+doing things the hard way here).
+
+Then, since the connection is file based only we don't need networking
+so `Network=none` will prevent the container from reaching out. Note
+that this also means no access to the container via `localhost` either
+(but still accessible locally, eg using
+`curl --unix-socket /run/user/1234/proxy/coffee.sock http://serverip/`).
+
+What this accomplishes is the web server that clients connect to is
+thoroughly unprivileged; for a more complex web app this hinders a bad
+actor who has compromised the web app or container from moving laterally
+through the machine or network. **This does not make the container
+un-hackable or inescapable**. It just makes it harder if/when the
+container does get compromised.
+
+### Areas to improve upon
+
+For a real/production deployment, there are a few things that should be
+fixed up:
+
+1. Nginx configurations and html code would be better if built into the
+   container directly, not volume mounted. **IMPORTANT** while this is
+   better, make sure some sort of CI/CD plan is in place to ensure your
+   new custom image is being kept up to date with whatever base image you
+   choose to use. In this example we're not modifying the base nginx
+   image so we can auto update when new releases are pushed to the repo.
+
+2. SSL isn't covered here; use it!!! In this architecture the reverse
+   proxy would be the place to do it. Images like Caddy make it pretty
+   easy.
 
 ## Getting started
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+1. Create a new user for the rootless container (requires root/admin):
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+   `sudo useradd teapot`
 
-## Add your files
+2. Enable linger to allow running services while not logged in:
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+   `sudo loginctl enable-linger teapot`
 
-```
-cd existing_repo
-git remote add origin https://gitlab.com/james-cws/podman-quadlet-coffee.git
-git branch -M main
-git push -uf origin main
-```
+3. Start a shell as the user:
 
-## Integrate with your tools
+   `sudo machinectl shell teapot@`
 
-* [Set up project integrations](https://gitlab.com/james-cws/podman-quadlet-coffee/-/settings/integrations)
+4. As the new user `teapot` clone this repo:
 
-## Collaborate with your team
+   `git clone https://gitlab.com/james-cws/podman-quadlet-coffee.git`
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+5. Setup our directory structure in the new user's home:
 
-## Test and Deploy
+   `mkdir -p ~/.config/containers/systemd ~/.config/nginx ~/.local/share/nginx
 
-Use the built-in continuous integration in GitLab.
+6. Install the quadlet unit files:
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+   `cp podman-quadlet-coffee/quadlets/* ~/.config/containers/systemd/`
 
-***
+7. Using your favourite text editor, edit/change at least the nginx
+   configuration file to your own, owned domain
 
-# Editing this README
+   `vim ~/.config/nginx/00_418.conf`
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+8. Reload the daemon & start the pod:
 
-## Suggestions for a good README
+   `systemctl --user daemon-reload`
+   `systemctl --user start coffee_418.service`
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+9. Check the logs for errors:
 
-## Name
-Choose a self-explaining name for your project.
+   `journalctl --user -xe`
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+10. Enable auto updates:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+   `systemctl --user enable --now podman-auto-update.timer`
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## Known Issues
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+1. Startup ordering isn't covered; this is a little tricky & I haven't
+   devised a general case solution yet. I'll update when I have something

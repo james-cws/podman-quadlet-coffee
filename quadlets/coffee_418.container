@@ -1,0 +1,30 @@
+[Unit]
+Description=Nginx server handling 418 error code
+
+[Container]
+ContainerName=teapot
+Image=docker.io/library/nginx:stable-alpine
+AutoUpdate=registry
+UserNS=auto
+# Depending on threat model & isolation needs, GroupAdd can be useful to
+# manage creating a specific group for proxy access accross multiple
+# separate users and/or namespaces
+#GroupAdd=yourproxygroup
+NoNewPrivileges=true
+Network=none
+Volume=%h/.config/nginx:/etc/nginx/conf.d/:Z,ro
+Volume=%h/.local/share/nginx/html/:/usr/share/nginx/html:Z,ro
+Volume=/run/user/%U/proxy:/sockets:U,z
+Timezone=UTC
+Environment=TZ=UTC
+
+[Service]
+ExecStartPre=mkdir -m 711 -p /run/user/%U/proxy
+# If using group level access control, set the group bit more permissive
+#ExecStartPre=mkdir -m 771 -p /run/user/%U/proxy
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
